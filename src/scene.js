@@ -879,12 +879,18 @@ export default class Scene {
             });
 
             this.cacheTile(tile);
-            tile.load(this);
+            this.buildTile(tile);
         }
         else {
             tile = this.tiles[key];
         }
         return tile;
+    }
+
+    buildTile(tile) {
+        this.trackTileSetLoadStart(tile);
+        this.tileBuildStart(tile.key);
+        tile.build(this.session).then(message => this.buildTileCompleted(message));
     }
 
     // tile manager
@@ -967,7 +973,7 @@ export default class Scene {
                     this.removeTile(tile.key);
                 }
             }
-            Tile.sort(build).forEach(tile => tile.build(this));
+            Tile.sort(build).forEach(tile => this.buildTile(tile));
 
             // Edge case: if nothing is being rebuilt, immediately resolve promise and don't lock further rebuilds
             if (this.building && Object.keys(this.building.tiles).length === 0) {
@@ -990,7 +996,6 @@ export default class Scene {
         });
     }
 
-    // TODO: move to Tile class
     // Called on main thread when a web worker completes processing for a single tile (initial load, or rebuild)
     buildTileCompleted({ tile, worker_id, selection_map_size }) {
         // Track selection map size (for stats/debug) - update per worker and sum across workers
@@ -1006,42 +1011,35 @@ export default class Scene {
             Tile.abortBuild(tile);
         }
         else {
-            var cached = this.tiles[tile.key];
-
             // Update tile with properties from worker
-            if (cached) {
-                tile = cached.merge(tile);
+            if (this.tiles[tile.key]) {
+                tile = this.tiles[tile.key].merge(tile);
             }
 
-            if (!tile.error) {
-                tile.finalizeBuild(this.styles);
-                this.dirty = true;
-            }
-            else {
-                log.error(`main thread tile load error for ${tile.key}: ${tile.error}`);
-            }
-            tile.printDebug();
+            tile.update(this);
+            tile.buildMeshes(this.styles);
+            this.dirty = true;
         }
 
         this.trackTileSetLoadStop();
-        this.trackTileBuildStop(tile.key);
+        this.tileBuildStop(tile.key);
     }
 
     // Track tile build state
-    trackTileBuildStart(key) {
+    tileBuildStart(key) {
         if (!this.building) {
             this.building = {
                 tiles: {}
             };
         }
         this.building.tiles[key] = true;
-        log.trace(`trackTileBuildStart for ${key}: ${Object.keys(this.building.tiles).length}`);
+        log.trace(`tileBuildStart for ${key}: ${Object.keys(this.building.tiles).length}`);
     }
 
-    trackTileBuildStop(key) {
+    tileBuildStop(key) {
         // Done building?
         if (this.building) {
-            log.trace(`trackTileBuildStop for ${key}: ${Object.keys(this.building.tiles).length}`);
+            log.trace(`tileBuildStop for ${key}: ${Object.keys(this.building.tiles).length}`);
             delete this.building.tiles[key];
             if (Object.keys(this.building.tiles).length === 0) {
                 log.info(`Scene: build geometry finished`);
@@ -1378,7 +1376,11 @@ export default class Scene {
 
     // Profiling methods used to track when sets of tiles start/stop loading together
     // e.g. initial page load is one set of tiles, new sets of tile loads are then initiated by a map pan or zoom
-    trackTileSetLoadStart() {
+    trackTileSetLoadStart(tile) {
+        if (tile.loaded) {
+            return;
+        }
+
         // Start tracking new tile set if no other tiles already loading
         if (this.tile_set_loading == null) {
             this.tile_set_loading = +new Date();
